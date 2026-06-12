@@ -53,22 +53,21 @@ Intent binds to the **before-run digest** — do not redeclare on the after-run.
 
 After `edit_allowed=true`, call `get_relevant_memory` before the first edit.
 **Always pass absolute `root`** (same as `analyze_repository`); `intent_id` or
-`scope` alone fails MCP validation. Requires `analyze_repository` before memory
-reads. Default policy auto-bootstraps on `get_relevant_memory`; use
-`refresh_from_run` for explicit ingest.
+`scope` alone fails MCP validation. Default `mcp_sync_policy=bootstrap_if_missing`
+auto-bootstraps when the store is missing and a session run exists; explicit
+`refresh_from_run` when you need a forced ingest. No MCP run → auto sync skipped.
 
-| Need                 | Tool                                                                     |
-|----------------------|--------------------------------------------------------------------------|
-| Ranked scope context | `get_relevant_memory(root=abs, scope=… \| intent_id=…)`                  |
-| One path             | `query_engineering_memory(mode=for_path, path=…)`                        |
+| Need                 | Tool                                                                                                                |
+|----------------------|---------------------------------------------------------------------------------------------------------------------|
+| Ranked scope context | `get_relevant_memory(root=abs, scope=… \| intent_id=…)`                                                             |
+| One path             | `query_engineering_memory(mode=for_path, path=…)`                                                                   |
 | Keyword search       | `query_engineering_memory(mode=search, query=…, filters={match_mode:…})`; optional `semantic=true` when index built |
-| Draft observation    | `manage_engineering_memory(action=record_candidate, …)`                  |
-| Post-edit proposals  | `finish(..., propose_memory=true)`                                       |
+| Draft observation    | `manage_engineering_memory(action=record_candidate, …)`                                                             |
+| Post-edit proposals  | `finish(..., propose_memory=true)`                                                                                  |
 
 Full playbook: `codeclone-engineering-memory` skill and
-`docs/book/26-engineering-memory.md`. Human approval via VS Code Memory view (not
-MCP) required to promote
-drafts — agents cannot activate records via MCP.
+`docs/book/13-engineering-memory/index.md`. Human approval via VS Code Memory view (not
+MCP) required to promote drafts — agents cannot activate records via MCP.
 
 Do not use memory to expand scope, override findings, or justify `do_not_touch`
 edits. Surface `contradiction_note` and stale warnings to the user.
@@ -80,11 +79,11 @@ a decision the next agent should not rediscover, call
 `manage_engineering_memory(action=record_candidate, …)` **before**
 `finish_controlled_change` — or use `propose_memory=true` on finish for a batch.
 
-| Write when | Examples |
-|------------|----------|
-| Incident | verify/hygiene surprise, recovery, workaround, blocked then unblocked |
+| Write when | Examples                                                               |
+|------------|------------------------------------------------------------------------|
+| Incident   | verify/hygiene surprise, recovery, workaround, blocked then unblocked  |
 | Complexity | non-obvious root cause, multi-file debug, acted on stale/contradiction |
-| Decision | tradeoff, “do not repeat X”, integration quirk |
+| Decision   | tradeoff, “do not repeat X”, integration quirk                         |
 
 Skip for trivial one-liner fixes only. See `change-control-gate` rule and
 `codeclone-engineering-memory` skill.
@@ -94,12 +93,12 @@ target ≤300 chars (hard reject above `max_statement_chars`, default 1000).
 
 ### After `start` (`edit_allowed` gate)
 
-| Response         | Action                                                                                                                                                                                                                       |
-|------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `needs_analysis` | Run step 1 for same `root`, then `start` again                                                                                                                                                                               |
-| `queued`         | **No edits.** Wait → `manage_change_intent(promote)`. If `before_run_evicted`: step 1 → `start` again                                                                                                                        |
+| Response         | Action                                                                                                                                                                                                                    |
+|------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `needs_analysis` | Run step 1 for same `root`, then `start` again                                                                                                                                                                            |
+| `queued`         | **No edits.** Wait → `manage_change_intent(promote)`. If `before_run_evicted`: step 1 → `start` again                                                                                                                     |
 | `blocked`        | **No edits.** Intent exists — clear via `manage_change_intent(clear)` if abandoning; follow `next_step`. If dirty scope is known WIP with no foreign overlap, retry `start` with `dirty_scope_policy="continue_own_wip"`. |
-| `active`         | Read `blast_radius` + `budget`. Edit only if `edit_allowed=true`. Budget `gate_preview.would_fail` is advisory — edit may proceed, but verify may reject.                                                                    |
+| `active`         | Read `blast_radius` + `budget`. Edit only if `edit_allowed=true`. Budget `gate_preview.would_fail` is advisory — edit may proceed, but verify may reject.                                                                 |
 
 **Edit permission:** `status == "active"` alone is not enough — require
 `edit_allowed == true`. Treat unknown start statuses as no permission.
@@ -141,41 +140,30 @@ honor-system. List every path you touched in `changed_files` when possible; the
 controller also reads git and blocks under-reporting or silent out-of-scope
 edits. You **must** declare scope wide enough at `start`.
 
-| `finish_block_reason` | Meaning | Agent action |
-|---|---|---|
-| `missing_evidence` | Git dirty inside `allowed_files` / `allowed_related` but missing from evidence | Add paths to `changed_files` / `diff_ref` or revert |
-| `new_unattributed_unscoped_dirty` | Out-of-scope dirty path appeared after `start` and is not foreign-attributed | Redeclare wider scope or revert |
-| `modified_unattributed_unscoped_dirty` | Out-of-scope dirty path existed at `start` but changed after `start` and is not foreign-attributed | Redeclare wider scope or reconcile |
-| `unknown_unattributed_unscoped_dirty` | Out-of-scope dirty path cannot be compared to a start snapshot; legacy/missing snapshot is conservative | Reconcile tree, restart with fresh intent, or redeclare |
-| `foreign_dirty_overlap` | Foreign **active/stale** intent previously declared same in-scope path | Coordinate with user |
+| `finish_block_reason`   | Blocks?                               | Action                                                  |
+|-------------------------|---------------------------------------|---------------------------------------------------------|
+| `missing_evidence`      | yes                                   | Add in-scope dirty paths to evidence or revert          |
+| `foreign_dirty_overlap` | yes                                   | Coordinate foreign intent on overlapping in-scope paths |
+| `own_unscoped_dirty`    | only if `CODECLONE_STRICT_FINISH` env | Reconcile out-of-scope dirt or widen scope              |
 
-- Dirty paths outside your scope owned by a **foreign active/stale** intent →
-  listed in `foreign_attributed_outside_scope`, **does not block** your finish.
-- Dirty paths outside your scope that were already dirty at `start` and did not
-  change are listed in `preexisting_unscoped_dirty`, **does not block** your
-  finish.
-- **`recoverable`** intents (dead owning PID) do **not** grant foreign
-  attribution — their dirty paths count as normal workspace dirt unless you
-  declare scope or revert.
-- Legacy `own_unscoped_dirty` may appear as a compatibility alias for
-  unattributed blocking dirt. Treat it as **unattributed**, not proof that the
-  current agent owns the edit.
-- On hygiene pass, scope check may use `files_for_scope_check` (evidence ∪
-  unattributed blocking dirt) instead of evidence alone.
+Out-of-scope unattributed dirt (`new_` / `modified_` / `unknown_unattributed_*`) and
+`preexisting_unscoped_dirty` are **advisory** — report them; they may elevate status to
+`accepted_with_external_changes` without blocking.
 
 ```
 finish_controlled_change(
   intent_id=...,
   changed_files=[...] | diff_ref=...,     # XOR
   after_run_id=...,                       # when verification.after_run_required
-  claims_text=...,                        # optional; validated when recommended
-  review_text=...,                        # optional human note; not claim-validated
+  detail_level=summary|full,              # hygiene attribution
+  patch_trail_detail=summary|full,        # patch_trail forensics
+  claims_text=...,                        # optional
+  propose_memory=...,                     # optional draft batch on accept
 )
 ```
 
-Internal order (do not replicate manually): hygiene **gate** → scope **check** →
-**verify** → claims (if `claims_text` + `claim_validation_recommended`) → receipt
-→ clear.
+Pipeline (do not replicate manually): hygiene → check → verify → patch_trail →
+claims → receipt → clear. `patch_trail` does not authorize edits.
 
 ### After `finish`
 
@@ -230,21 +218,11 @@ user-facing advisory.
 `health_delta: -2`, `verdict: regressed` → tell the user health fell; do not stop
 at "patch accepted".
 
-## Verify profiles (controller decides)
+## Verify profiles
 
-**`start` always required.** Profile affects after-run and structural checks only.
-
-| Priority | Profile                 | Trigger                         | After-run |
-|----------|-------------------------|---------------------------------|-----------|
-| 1        | `state_artifact_change` | baseline/cache touched          | violated  |
-| 2        | `python_structural`     | any `.py`/`.pyi` incl. tests    | yes       |
-| 3        | `governance_config`     | pyproject, CI, Dockerfile… only | yes       |
-| 4        | `documentation_only`    | docs only                       | no        |
-| 5        | `non_python_patch`      | other non-py, non-docs          | no        |
-
-Read `verification.verification_profile` and `after_run_required` from `finish` —
-do not guess. Docs/non-python may verify without after-run when diff evidence
-exists. Receipts: skipped checks = "not applicable", never "passed".
+Controller derives profile from changed files — read
+`verification.verification_profile` and `after_run_required` from finish.
+Do not guess. Details: `help(topic="verification_profiles")`.
 
 ## Atomic fallback (legacy / debug only)
 

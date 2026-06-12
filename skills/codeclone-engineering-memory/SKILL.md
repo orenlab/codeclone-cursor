@@ -8,7 +8,7 @@ description: Use CodeClone Engineering Memory via MCP — scope context before e
 Local SQLite store of evidence-linked repository facts. Complements change
 control — does **not** replace analysis, blast radius, or patch verify.
 
-Full contract: `docs/book/26-engineering-memory.md`. MCP help:
+Full contract: `docs/book/13-engineering-memory/index.md`. MCP help:
 `help(topic="engineering_memory")`.
 
 ## Prerequisites
@@ -36,6 +36,8 @@ Do not invent memory from local files or report dumps.
 | Keyword discovery                | `query_engineering_memory` | `mode=search`, `query`, `filters={match_mode:"any"\|"all"}`; optional `semantic=true` when index built |
 | Store health                     | `query_engineering_memory` | `mode=status`                                               |
 | Stale inventory                  | `query_engineering_memory` | `mode=stale`                                                |
+| Trajectory forensics             | `query_engineering_memory` | `mode=trajectory_get\|trajectory_search\|trajectory_status` |
+| Trajectory analytics             | `query_engineering_memory` | `mode=trajectory_anomalies\|trajectory_agents\|trajectory_dashboard` |
 
 Defaults exclude **stale**. Keyword `search` excludes drafts unless
 `include_drafts=true`; scoped `get_relevant_memory` and `for_path` /
@@ -48,7 +50,8 @@ Repository default: `memory.semantic.enabled=false`. To use semantic blend:
 
 1. Enable `[tool.codeclone.memory.semantic]` in `pyproject.toml`
 2. `pip install 'codeclone[semantic-lancedb]'`
-3. `codeclone memory semantic rebuild`
+3. `manage_engineering_memory(action=rebuild_semantic_index)` (MCP) or
+   `codeclone memory semantic rebuild` (CLI/CI)
 4. `query_engineering_memory(mode=search, semantic=true, …)`
 
 Without a built index, search stays FTS-only (`semantic.used: false` in the
@@ -70,6 +73,10 @@ semantic-quality embeddings — do not present hits as LLM recall.
 | Validate claims before finish   | `manage_engineering_memory(action=validate_claims, text=…)`                                 | Memory-layer guard           |
 | Post-edit batch proposal        | `finish_controlled_change(..., propose_memory=true)`                                        | On **accept** only           |
 | Refresh system facts from run   | `manage_engineering_memory(action=refresh_from_run, run_id?)`                               | Force ingest                 |
+| Rebuild semantic LanceDB sidecar | `manage_engineering_memory(action=rebuild_semantic_index)`                                 | After semantic enabled + extras |
+| Rebuild trajectories             | `manage_engineering_memory(action=rebuild_trajectories)`                                   | After audit-enabled workflows   |
+| Promote an Experience            | `manage_engineering_memory(action=promote_experience, experience_id=…)`                    | Creates a human-reviewable draft |
+| Projection jobs                  | `manage_engineering_memory(action=enqueue_projection_rebuild)` / `action=projection_rebuild_status` / `action=run_projection_jobs_once` | When policy enabled |
 | Atomic fallback                 | `manage_engineering_memory(action=propose_from_receipt, text=…, intent_id?)`                | When finish hook unavailable |
 
 ### Write rules
@@ -88,8 +95,15 @@ semantic-quality embeddings — do not present hits as LLM recall.
 - **Never** use project root as memory scope (`"."`, `""`, unscoped retrieval)
 - Compress observations before `record_candidate`: one durable fact, target
   ≤300 chars; rewrite if >500; hard reject >1000
-- List responses are compact by default — use `mode=get` or `detail_level=full`
-  for complete statements
+- Read compact lanes separately: `records[]` are durable assertions,
+  `experiences[]` are advisory patterns, `trajectories[]` are bounded examples,
+  and `coverage` describes evidence availability
+- Compact is default: subject lists are bounded with
+  `subject_count`/`subjects_truncated`; experience diversity uses
+  `multi_agent`/`dominant_agent_facet`; trajectory contracts, steps, evidence
+  ids, payloads, and the duplicated root Patch Trail are omitted
+- Use `mode=get`, `trajectory_get`, or `detail_level=full` for complete
+  statements, subjects, agent facets, contracts, evidence, and payloads
 
 ## When NOT to use memory
 
@@ -98,6 +112,7 @@ semantic-quality embeddings — do not present hits as LLM recall.
 - Overriding CodeClone findings
 - Substituting for `analyze_repository` or `get_blast_radius`
 - Treating draft/stale as verified project policy
+- Treating `trajectories[]` or `patch_trail_summary` as edit authorization
 
 ## Integration with change control
 

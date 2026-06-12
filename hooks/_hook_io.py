@@ -15,7 +15,6 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 _SHELL_CHAIN_SPLIT = re.compile(r"\s*(?:&&|\|\||;|\|)\s*")
 
@@ -154,7 +153,7 @@ def is_git_shell_command(command: str) -> bool:
     return all(_segment_invokes_git(segment) for segment in segments)
 
 
-def shell_command_from_hook(data: Mapping[str, Any]) -> str:
+def shell_command_from_hook(data: Mapping[str, object]) -> str:
     if str(data.get("tool_name", "")) != "Shell":
         return ""
     tool_input = data.get("tool_input")
@@ -196,7 +195,7 @@ def emit_hook_payload(payload: Mapping[str, object] | None = None) -> None:
         print(_EMPTY_JSON)
 
 
-def parse_hook_input(raw: str) -> dict[str, Any] | None:
+def parse_hook_input(raw: str) -> dict[str, object] | None:
     if not raw:
         return None
     try:
@@ -220,11 +219,11 @@ def is_python_source_path(file_path: str) -> bool:
     return any(lowered.endswith(suffix) for suffix in _PYTHON_SUFFIXES)
 
 
-def edited_path_from_pre_tool_use(data: Mapping[str, Any]) -> str:
+def edited_path_from_pre_tool_use(data: Mapping[str, object]) -> str:
     return edited_path_from_post_tool_use(data)
 
 
-def edited_path_from_post_tool_use(data: Mapping[str, Any]) -> str:
+def edited_path_from_post_tool_use(data: Mapping[str, object]) -> str:
     tool_name = str(data.get("tool_name", ""))
     if tool_name not in _WRITE_TOOLS:
         return ""
@@ -238,7 +237,7 @@ def edited_path_from_post_tool_use(data: Mapping[str, Any]) -> str:
     return ""
 
 
-def workspace_root_from_hook(data: Mapping[str, Any]) -> str:
+def workspace_root_from_hook(data: Mapping[str, object]) -> str:
     roots = data.get("workspace_roots")
     if isinstance(roots, list) and roots:
         first = roots[0]
@@ -260,7 +259,7 @@ def python_edit_reminder_context(*, workspace_root: str) -> str:
     )
 
 
-def transcript_path_from_hook(data: Mapping[str, Any]) -> str:
+def transcript_path_from_hook(data: Mapping[str, object]) -> str:
     value = data.get("transcript_path")
     return value if isinstance(value, str) else ""
 
@@ -350,20 +349,141 @@ def change_control_denial_payload(
     }
 
 
-def workflow_intent_looks_unclosed(transcript: str) -> bool:
-    """Return True when transcript suggests starts without a matching clear/finish."""
-    starts = (
-        transcript.count("start_controlled_change")
-        + transcript.count('"action":"declare"')
-        + transcript.count('"action": "declare"')
+_MCP_WORKFLOW_OPEN = frozenset({"start", "declare"})
+_MCP_WORKFLOW_CLOSE = frozenset({"finish", "clear"})
+
+
+def _mcp_workflow_event_from_call_mcp_tool(
+    tool_input: Mapping[str, object],
+) -> str | None:
+    tool_name = tool_input.get("toolName")
+    if not isinstance(tool_name, str):
+        return None
+    if tool_name == "start_controlled_change":
+        return "start"
+    if tool_name == "finish_controlled_change":
+        return "finish"
+    if tool_name != "manage_change_intent":
+        return None
+    arguments = tool_input.get("arguments")
+    if not isinstance(arguments, Mapping):
+        return None
+    action = arguments.get("action")
+    if action == "declare":
+        return "declare"
+    if action == "clear":
+        return "clear"
+    return None
+
+
+def _call_mcp_workflow_event_from_block(block: object) -> str | None:
+    if not isinstance(block, Mapping):
+        return None
+    if block.get("type") != "tool_use" or block.get("name") != "CallMcpTool":
+        return None
+    tool_input = block.get("input")
+    if not isinstance(tool_input, Mapping):
+        return None
+    return _mcp_workflow_event_from_call_mcp_tool(tool_input)
+
+
+def _iter_call_mcp_workflow_events_from_message_content(
+    content: object,
+) -> list[str]:
+    if not isinstance(content, list):
+        return []
+    events: list[str] = []
+    for block in content:
+        event = _call_mcp_workflow_event_from_block(block)
+        if event is not None:
+            events.append(event)
+    return events
+
+
+def _workflow_events_from_jsonl_line(line: str) -> list[str]:
+    stripped = line.strip()
+    if not stripped:
+        return []
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, Mapping):
+        return []
+    message = payload.get("message")
+    if not isinstance(message, Mapping):
+        return []
+    return _iter_call_mcp_workflow_events_from_message_content(message.get("content"))
+
+
+def _transcript_open_mcp_workflow_cycles(transcript: str) -> int:
+    """Count unclosed MCP workflow cycles from JSONL ``CallMcpTool`` events only."""
+
+    open_cycles = 0
+    for line in transcript.splitlines():
+        for event in _workflow_events_from_jsonl_line(line):
+            if event in _MCP_WORKFLOW_OPEN:
+                open_cycles += 1
+            elif event in _MCP_WORKFLOW_CLOSE:
+                open_cycles = max(0, open_cycles - 1)
+    return open_cycles
+
+
+def transcript_mcp_workflow_looks_unclosed(transcript: str) -> bool:
+    """Fallback when registry is unavailable: parse JSONL tool_use events only."""
+
+    return _transcript_open_mcp_workflow_cycles(transcript) > 0
+
+
+def session_cleanup_followup_message(*, intent_ids: tuple[str, ...]) -> str:
+    if intent_ids:
+        joined = ", ".join(intent_ids)
+        return (
+            "CodeClone: workspace still has unclosed change-control intent(s): "
+            f"{joined}. Before ending, run `finish_controlled_change` with the "
+            "active `intent_id`, or "
+            '`manage_change_intent(action="clear", intent_id=..., root=<abs>)` '
+            "when abandoning work."
+        )
+    return (
+        "CodeClone: this session may have started change control without a matching "
+        "`finish_controlled_change`. Before ending, run "
+        "`finish_controlled_change` with the active `intent_id`, or "
+        '`manage_change_intent(action="list_workspace", root=<abs>)` to inspect '
+        "stale intents."
     )
-    if starts == 0:
-        return False
-    cleared = (
-        transcript.count('"intent_cleared":true')
-        + transcript.count('"intent_cleared": true')
-        + transcript.count('"action":"clear"')
-        + transcript.count('"action": "clear"')
-    )
-    finishes = transcript.count("finish_controlled_change")
-    return starts > cleared and starts > finishes
+
+
+def _transcript_fallback_should_warn(
+    transcript: str | None,
+) -> tuple[bool, tuple[str, ...]]:
+    if transcript is not None and transcript_mcp_workflow_looks_unclosed(transcript):
+        return True, ()
+    return False, ()
+
+
+def session_cleanup_should_warn(
+    *,
+    repo_root: Path | None,
+    transcript: str | None,
+) -> tuple[bool, tuple[str, ...]]:
+    """Return whether stop should warn and any registry intent ids."""
+
+    if repo_root is None:
+        return _transcript_fallback_should_warn(transcript)
+
+    try:
+        from codeclone.workspace_intent.gate import (
+            WorkspaceIntentRegistryUnavailable,
+            list_unclosed_workspace_intents_for_hook_cleanup,
+        )
+    except Exception:
+        return _transcript_fallback_should_warn(transcript)
+
+    try:
+        unclosed = list_unclosed_workspace_intents_for_hook_cleanup(repo_root)
+    except WorkspaceIntentRegistryUnavailable:
+        return _transcript_fallback_should_warn(transcript)
+
+    intent_ids = tuple(item.intent_id for item in unclosed)
+    return bool(intent_ids), intent_ids
