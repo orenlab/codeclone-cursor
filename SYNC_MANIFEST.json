@@ -1,9 +1,9 @@
 {
   "codeclone_version": "2.1.0a1",
   "files_copied": 30,
-  "files_deleted": 30,
-  "source_commit": "38940cf",
-  "source_commit_full": "38940cfa0b9b89e45c3d44433368b77e121df216",
+  "files_deleted": 31,
+  "source_commit": "ece558d",
+  "source_commit_full": "ece558dde27b3b1643b0d0bc9385f340b496f617",
   "source_dirty": false,
   "source_paths": [
     "plugins/cursor-codeclone",
@@ -11,6 +11,6 @@
     "scripts/integration_dist/gitignore.cursor"
   ],
   "source_repository": "orenlab/codeclone",
-  "synced_at_utc": "2026-06-17T07:20:43+00:00",
+  "synced_at_utc": "2026-06-17T18:09:02+00:00",
   "target": "cursor"
 }
